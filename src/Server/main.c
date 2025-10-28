@@ -12,13 +12,12 @@
 #include <signal.h>
 #include <pthread.h>
 
+#include "../Common/utils.h"
 #include "clt_thr.h"
-#include "Common/util.h"
 
-// DEFINES
+const int BACKLOG = 10;
+const int PORTNUM = 1234;
 
-#define BACKLOG 10
-    
 // FUNCTIONS
 
 int main(int argc, char** argv){
@@ -28,18 +27,20 @@ int main(int argc, char** argv){
 	struct addrinfo* s_info;
 
 	memset(&hints, 0, sizeof hints);   
-	hints.ai_family = AF_INET; 
+	hints.ai_family = AF_UNSPEC; 
 	hints.ai_socktype = SOCK_STREAM; 
 	hints.ai_flags = AI_PASSIVE; 
 
-	// trova server nella rete locale
-	if(getaddrinfo(NULL, PORT_STR, &hints, &s_info) != 0)	
+	char sPort[16];
+	sprintf(sPort, "%d", PORTNUM);
+	
+	if(getaddrinfo(NULL, sPort, &hints, &s_info) != 0)	
 	{
 		P_EXT("getaddrinfo error\n");
 	}	
 	
-    if ((skt_fd = socket(s_info->ai_family, 
-					s_info->ai_socktype, s_info->ai_protocol)) == -1)
+	if ((skt_fd = socket(s_info->ai_family, 
+		s_info->ai_socktype, s_info->ai_protocol)) == -1)
 	{
 		P_EXT("socket creation error\n");
 	}
