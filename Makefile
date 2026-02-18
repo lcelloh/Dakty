@@ -8,8 +8,8 @@ SERVER_BIN = dakty_server
 CLIENT_BIN = dakty_client
 
 # Definizione dei file sorgente
-SERVER_SRC = src/server.c src/threadpool.c src/server_handler.c src/persistence.c
-CLIENT_SRC = src/client.c src/client_controller.c
+SERVER_SRC = src/server.c src/threadpool.c src/server_handler.c src/persistence.c src/net_utils.c
+CLIENT_SRC = src/client.c src/client_controller.c src/net_utils.c
 
 # Regola di default: compila sia il server che il client
 all: $(SERVER_BIN) $(CLIENT_BIN)

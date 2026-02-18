@@ -28,13 +28,13 @@ typedef struct __attribute__((packed)) {
 } DKTHeader;
 
 // Payload per le fasi di Registrazione e Login
-typedef struct {
+typedef struct __attribute__((packed)){
     char username[MAX_USERNAME];
     char password[MAX_PASSWORD];
 } AuthPayload;
 
 // Payload per l'invio o la ricezione di messaggi in bacheca
-typedef struct {
+typedef struct __attribute__((packed)){
     uint32_t id;
     char sender[MAX_USERNAME];
     char subject[MAX_SUBJECT];
@@ -46,7 +46,7 @@ typedef struct __attribute__((packed)) {
 } DeletePayload;
 
 // 3. Cosa invia il Server al Client quando legge la bacheca
-typedef struct {
+typedef struct __attribute__((packed)){
     uint32_t message_id; // Fondamentale da mostrare all'utente per farglielo eliminare poi
     char sender[MAX_USERNAME];
     char subject[MAX_SUBJECT];
@@ -54,7 +54,7 @@ typedef struct {
 } ResponsePayload;
 
 // Payload generico per inviare messaggi di errore al client
-typedef struct {
+typedef struct __attribute__((packed)){
     char error_msg[128];
 } ErrorPayload;
 
