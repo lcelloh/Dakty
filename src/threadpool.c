@@ -3,15 +3,24 @@
 #include <pthread.h>
 #include "../include/threadpool.h"
 
-// 1. Inizializzazione della struttura del Thread Pool
+/*
+ * Descrizione: Inizializza la struttura del Thread Pool, azzerando gli indici
+ * della coda circolare e configurando il mutex e le variabili di condizione
+ * necessarie per la sincronizzazione dei thread.
+ *
+ * Parametri:
+ * pool - Puntatore alla struttura ThreadPool da inizializzare.
+ *
+ * Ritorno:
+ * void - Nessun valore restituito. In caso di fallimento delle syscall di init,
+ * il processo termina con EXIT_FAILURE.
+ */
 void pool_init(ThreadPool *pool) {
     pool->head = 0;
     pool->tail = 0;
     pool->count = 0;
     pool->shutdown = 0;
 
-    // Inizializzazione del mutex e delle variabili di condizione.
-    // Utilizziamo NULL per gli attributi di default.
     if (pthread_mutex_init(&pool->lock, NULL) != 0) {
         perror("Errore: inizializzazione mutex fallita");
         exit(EXIT_FAILURE);
@@ -26,60 +35,89 @@ void pool_init(ThreadPool *pool) {
     }
 }
 
-// 2. Sottomissione di un nuovo client socket (Produttore)
+/*
+ * Descrizione: Sottomette un nuovo descrittore di socket alla coda dei task
+ * (ruolo Produttore). Gestisce l'attesa se la coda ha raggiunto la sua capacità massima.
+ *
+ * Parametri:
+ * pool - Puntatore alla struttura ThreadPool condivisa.
+ * client_socket - File descriptor del socket del nuovo client da accodare.
+ *
+ * Ritorno:
+ * void - Nessun valore restituito.
+ */
 void pool_submit(ThreadPool *pool, int client_socket) {
-    // Acquisizione del lock per modificare i dati condivisi
     pthread_mutex_lock(&pool->lock);
 
-    // Se la coda è piena, il thread principale (produttore) deve aspettare.
-    // Usiamo un ciclo 'while' per difenderci dai "spurious wakeups" (risvegli fasulli).
+    /* Ciclo while per difendersi dalla vulnerabilità dei risvegli spuri (spurious wakeups) */
     while (pool->count == QUEUE_SIZE) {
         pthread_cond_wait(&pool->not_full, &pool->lock);
     }
 
-    // Inserimento del socket e avanzamento del tail con logica circolare
     pool->client_sockets[pool->tail] = client_socket;
     pool->tail = (pool->tail + 1) % QUEUE_SIZE;
     pool->count++;
 
-    // Segnaliamo a un worker thread in attesa che la coda non è più vuota
+    /* Segnala a un consumatore in attesa che la coda contiene un nuovo task */
     pthread_cond_signal(&pool->not_empty);
 
-    // Rilascio del lock
     pthread_mutex_unlock(&pool->lock);
 }
 
+/*
+ * Descrizione: Preleva un socket in attesa dalla coda dei task (ruolo Consumatore).
+ * I worker thread utilizzano questa funzione bloccante per ottenere il prossimo client.
+ *
+ * Parametri:
+ * pool - Puntatore alla struttura ThreadPool condivisa.
+ *
+ * Ritorno:
+ * int - Il file descriptor del socket estratto, oppure -1 per indicare
+ * che il server è in fase di spegnimento e il thread chiamante deve terminare.
+ */
 int pool_fetch(ThreadPool *pool) {
     int client_socket;
+    
     pthread_mutex_lock(&pool->lock);
 
-    // Se la coda è vuota e NON siamo in shutdown, aspetta.
     while (pool->count == 0 && !pool->shutdown) {
         pthread_cond_wait(&pool->not_empty, &pool->lock);
     }
 
-    // Se ci siamo svegliati e il server è in spegnimento (e la coda è vuota)
+    /* Valutazione della condizione di Graceful Shutdown: coda vuota e segnale di arresto */
     if (pool->shutdown && pool->count == 0) {
         pthread_mutex_unlock(&pool->lock);
-        return -1; // Segnale speciale per far terminare il worker thread
+        return -1; 
     }
 
     client_socket = pool->client_sockets[pool->head];
     pool->head = (pool->head + 1) % QUEUE_SIZE;
     pool->count--;
 
+    /* Segnala al produttore che si è liberato uno slot nella coda */
     pthread_cond_signal(&pool->not_full);
+    
     pthread_mutex_unlock(&pool->lock);
 
     return client_socket;
 }
 
-// Da aggiungere dentro pool_init(): pool->shutdown = 0;
-
+/*
+ * Descrizione: Avvia la procedura di chiusura sicura (Graceful Shutdown) del Thread Pool.
+ * Imposta il flag di spegnimento e risveglia forzatamente tutti i worker dormienti.
+ *
+ * Parametri:
+ * pool - Puntatore alla struttura ThreadPool da arrestare.
+ *
+ * Ritorno:
+ * void - Nessun valore restituito.
+ */
 void pool_shutdown(ThreadPool *pool) {
     pthread_mutex_lock(&pool->lock);
     pool->shutdown = 1;
-    // Usiamo broadcast per svegliare TUTTI i thread in attesa su 'not_empty'
+    
+    /* Utilizzo di broadcast per risvegliare simultaneamente tutti i thread bloccati su fetch */
     pthread_cond_broadcast(&pool->not_empty); 
+    
     pthread_mutex_unlock(&pool->lock);
 }

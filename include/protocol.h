@@ -1,15 +1,19 @@
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
 
-#include <stdint.h> // Necessario per uint32_t
+#include <stdint.h>
 
+/* Costanti di dimensionamento dei buffer per le stringhe del protocollo */
 #define MAX_USERNAME 32
 #define MAX_PASSWORD 32
-
 #define MAX_SUBJECT 64
 #define MAX_BODY 512
 
-// Tipi di operazioni supportate dal protocollo Dakty
+/*
+ * Descrizione: Enumerazione dei codici operativi del protocollo Dakty.
+ * Definisce il tipo di richiesta inviata dal client o il tipo di
+ * risposta restituita dal server.
+ */
 typedef enum {
     REQ_REGISTER,
     REQ_LOGIN,
@@ -21,40 +25,86 @@ typedef enum {
     RESP_ERROR
 } OperationType;
 
-// Ogni pacchetto sarà costituito da header + payload
+/*
+ * Descrizione: Struttura base dell'header di protocollo.
+ * Precede ogni comunicazione di rete per indicare il tipo di operazione
+ * e la dimensione dei dati successivi. Viene serializzata senza padding.
+ *
+ * Campi:
+ * type - Codice operativo (appartenente a OperationType).
+ * payload_length - Dimensione in byte del payload associato, in formato Network Byte Order.
+ */
 typedef struct __attribute__((packed)) {
-    uint8_t type;            // 1 Byte fisso
-    uint32_t payload_length; // 4 Byte fissi (da usare con htonl/ntohl)
+    uint8_t type;
+    uint32_t payload_length;
 } DKTHeader;
 
-// Payload per le fasi di Registrazione e Login
-typedef struct __attribute__((packed)){
+/*
+ * Descrizione: Payload utilizzato per le operazioni di autenticazione.
+ * Trasporta i dati per REQ_REGISTER e REQ_LOGIN.
+ *
+ * Campi:
+ * username - Stringa contenente il nome utente.
+ * password - Stringa contenente la password.
+ */
+typedef struct __attribute__((packed)) {
     char username[MAX_USERNAME];
     char password[MAX_PASSWORD];
 } AuthPayload;
 
-// Payload per l'invio o la ricezione di messaggi in bacheca
-typedef struct __attribute__((packed)){
+/*
+ * Descrizione: Payload utilizzato dal client per l'invio di un nuovo
+ * messaggio in bacheca (REQ_POST_MSG).
+ *
+ * Campi:
+ * id - Identificativo del messaggio (compilato dal server).
+ * sender - Mittente del messaggio (compilato dal server tramite sessione).
+ * subject - Oggetto del messaggio digitato dall'utente.
+ * body - Corpo testuale del messaggio digitato dall'utente.
+ */
+typedef struct __attribute__((packed)) {
     uint32_t id;
     char sender[MAX_USERNAME];
     char subject[MAX_SUBJECT];
     char body[MAX_BODY];
 } MessagePayload;
 
+/*
+ * Descrizione: Payload utilizzato per richiedere l'eliminazione di
+ * un messaggio esistente (REQ_DELETE_MSG).
+ *
+ * Campi:
+ * message_id - ID del messaggio da eliminare, in formato Network Byte Order.
+ */
 typedef struct __attribute__((packed)) {
     uint32_t message_id;
 } DeletePayload;
 
-// 3. Cosa invia il Server al Client quando legge la bacheca
-typedef struct __attribute__((packed)){
-    uint32_t message_id; // Fondamentale da mostrare all'utente per farglielo eliminare poi
+/*
+ * Descrizione: Payload utilizzato dal server per inviare i singoli messaggi
+ * al client durante la lettura della bacheca (risposta a REQ_READ_MSG).
+ *
+ * Campi:
+ * message_id - ID univoco del messaggio, in formato Network Byte Order.
+ * sender - Autore del messaggio.
+ * subject - Oggetto del messaggio.
+ * body - Corpo del messaggio.
+ */
+typedef struct __attribute__((packed)) {
+    uint32_t message_id;
     char sender[MAX_USERNAME];
     char subject[MAX_SUBJECT];
     char body[MAX_BODY];
 } ResponsePayload;
 
-// Payload generico per inviare messaggi di errore al client
-typedef struct __attribute__((packed)){
+/*
+ * Descrizione: Payload opzionale utilizzato dal server per fornire
+ * dettagli testuali al client in caso di fallimento di un'operazione (RESP_ERROR).
+ *
+ * Campi:
+ * error_msg - Stringa descrittiva dell'errore verificatosi lato server.
+ */
+typedef struct __attribute__((packed)) {
     char error_msg[128];
 } ErrorPayload;
 

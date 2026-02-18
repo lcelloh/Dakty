@@ -6,12 +6,10 @@
 #include "../include/persistence.h"
 
 #define DB_USER_FILE "data/utenti.txt"
-#define DB_MSG_FILE "data/messaggi.txt" // Nuovo file per i messaggi
+#define DB_MSG_FILE "data/messaggi.txt"
 #define WRITE_QUEUE_SIZE 50
 
-// ==========================================
-//  1. STATO: UTENTI
-// ==========================================
+//  STATO: UTENTI
 static UserRecord user_cache[MAX_USERS];
 static int user_count = 0;
 static pthread_mutex_t cache_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -22,25 +20,31 @@ static pthread_mutex_t uq_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t uq_not_empty = PTHREAD_COND_INITIALIZER;
 static pthread_t user_io_thread;
 
-// ==========================================
-//  2. STATO: MESSAGGI
-// ==========================================
-static MessageRecord message_cache[MAX_MESSAGGES];
+//  STATO: MESSAGGI
+static MessageRecord message_cache[MAX_MESSAGGES]; // Mantiene la dicitura originale del tuo header
 static int message_count = 0;
 static uint32_t next_message_id = 1;
 static pthread_mutex_t msg_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Invece di salvare solo le aggiunte, per il nostro progetto OS 
-// usiamo un comando "FLUSH" per i messaggi. Quando la bacheca cambia (aggiunta o rimozione),
-// diciamo al thread di riscrivere il file per mantenere la sincronia.
 static int msg_needs_flush = 0; 
 static pthread_mutex_t mq_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t mq_flush_needed = PTHREAD_COND_INITIALIZER;
 static pthread_t msg_io_thread;
 
 static int persistence_running = 1;
-// ==========================================
 
+//  WORKER THREADS
+
+/*
+ * Descrizione: Thread worker in background dedicato al salvataggio incrementale
+ * degli utenti. Estrae i record dalla coda circolare e li appende al file su disco.
+ *
+ * Parametri:
+ * arg - Puntatore generico (non utilizzato, richiesto dalla firma di pthreads).
+ *
+ * Ritorno:
+ * void* - Restituisce sempre NULL alla terminazione del thread.
+ */
 static void* io_user_worker(void* arg) {
     while (1) {
         pthread_mutex_lock(&uq_mutex);
@@ -67,8 +71,18 @@ static void* io_user_worker(void* arg) {
     return NULL;
 }
 
-// Thread Messaggi (Lavora in modalità "Dump/Truncate")
-// Riscrive tutto l'array sul disco quando c'è una modifica (aggiunta o cancellazione)
+/*
+ * Descrizione: Thread worker in background per la persistenza dei messaggi.
+ * Utilizza un approccio "Dump/Truncate": ad ogni segnalazione di modifica,
+ * esegue una copia locale della cache e sovrascrive interamente il file su disco
+ * per mantenere la sincronia in caso di eliminazioni.
+ *
+ * Parametri:
+ * arg - Puntatore generico (non utilizzato).
+ *
+ * Ritorno:
+ * void* - Restituisce sempre NULL alla terminazione del thread.
+ */
 static void* io_message_worker(void* arg) {
     while (1) {
         pthread_mutex_lock(&mq_mutex);
@@ -81,14 +95,12 @@ static void* io_message_worker(void* arg) {
             break;
         }
         
-        msg_needs_flush = 0; // Reset del flag
+        msg_needs_flush = 0; 
         pthread_mutex_unlock(&mq_mutex);
 
-        // Blocca la cache il minimo indispensabile per copiare i dati in un buffer locale sicuro
-        // per poi scriverli sul disco senza bloccare i lettori per molto tempo.
+        /* Copia della cache in un buffer locale per minimizzare il tempo di lock */
         pthread_mutex_lock(&msg_mutex);
         int local_count = message_count;
-        // Allocazione dinamica o statica locale per fare il dump
         MessageRecord* local_dump = malloc(local_count * sizeof(MessageRecord));
         if (local_dump) {
             memcpy(local_dump, message_cache, local_count * sizeof(MessageRecord));
@@ -96,10 +108,8 @@ static void* io_message_worker(void* arg) {
         pthread_mutex_unlock(&msg_mutex);
 
         if (local_dump) {
-            FILE* file = fopen(DB_MSG_FILE, "w"); // "w" svuota il file prima di scriverlo
+            FILE* file = fopen(DB_MSG_FILE, "w"); 
             if (file) {
-                // Scriviamo il formato: ID|Autore|Oggetto|Testo
-                // Usiamo un delimitatore raro (es. |) perché oggetto e testo contengono spazi!
                 for (int i = 0; i < local_count; i++) {
                     fprintf(file, "%u|%s|%s|%s\n", 
                             local_dump[i].id, 
@@ -115,7 +125,14 @@ static void* io_message_worker(void* arg) {
     return NULL;
 }
 
-// Funzione helper interna per dire al thread messaggi di salvare
+/*
+ * Descrizione: Funzione helper che segnala al thread di persistenza dei
+ * messaggi la necessità di effettuare un nuovo dump su disco.
+ *
+ * Parametri: Nessuno.
+ *
+ * Ritorno: Nessuno.
+ */
 static void trigger_message_flush() {
     pthread_mutex_lock(&mq_mutex);
     msg_needs_flush = 1;
@@ -124,8 +141,18 @@ static void trigger_message_flush() {
 }
 
 // ==========================================
-// PERSISTENCE API
+// PERSISTENCE API (PUBBLICHE)
 // ==========================================
+
+/*
+ * Descrizione: Inizializza il modulo di persistenza. Carica in RAM gli utenti
+ * e i messaggi dai rispettivi file, allinea il contatore degli ID autoincrementanti
+ * e avvia i thread worker asincroni per le operazioni di I/O.
+ *
+ * Parametri: Nessuno.
+ *
+ * Ritorno: Nessuno.
+ */
 void persistence_init() {
     FILE* f_users = fopen(DB_USER_FILE, "r");
     if (f_users) {
@@ -138,16 +165,13 @@ void persistence_init() {
         fclose(f_users);
     }
     
-    // CARICAMENTO MESSAGGI E SINCRONIZZAZIONE ID
     FILE* f_msgs = fopen(DB_MSG_FILE, "r");
     uint32_t max_id = 0;
     if (f_msgs) {
-        char line[1024]; // Buffer capiente per leggere una riga intera
+        char line[1024];
         while (fgets(line, sizeof(line), f_msgs) != NULL && message_count < MAX_MESSAGGES) {
-            // Rimuoviamo il newline
             line[strcspn(line, "\n")] = '\0';
             
-            // Usiamo strtok per separare i campi dal delimitatore '|'
             char* id_str = strtok(line, "|");
             char* sender = strtok(NULL, "|");
             char* subject = strtok(NULL, "|");
@@ -168,17 +192,24 @@ void persistence_init() {
         fclose(f_msgs);
     }
     
-    next_message_id = max_id + 1; // Allineamento dell'Auto-Increment!
+    next_message_id = max_id + 1; 
     
     printf("[Sistema] Persistenza: %d Utenti, %d Messaggi (Next ID: %u).\n", user_count, message_count, next_message_id);
     
-    // Avvio dei due thread gemelli
     pthread_create(&user_io_thread, NULL, io_user_worker, NULL);
     pthread_create(&msg_io_thread, NULL, io_message_worker, NULL);
 }
 
+/*
+ * Descrizione: Segnala ai thread worker di I/O l'avvio della procedura di
+ * spegnimento del server e attende in modo bloccante la loro terminazione
+ * tramite pthread_join per garantire il salvataggio dei dati pendenti.
+ *
+ * Parametri: Nessuno.
+ *
+ * Ritorno: Nessuno.
+ */
 void persistence_shutdown() {
-    // Segnale di stop globale
     pthread_mutex_lock(&uq_mutex);
     pthread_mutex_lock(&mq_mutex);
     persistence_running = 0;
@@ -187,22 +218,32 @@ void persistence_shutdown() {
     pthread_mutex_unlock(&mq_mutex);
     pthread_mutex_unlock(&uq_mutex);
     
-    // Attendiamo la fine di entrambi i thread
     pthread_join(user_io_thread, NULL);
     pthread_join(msg_io_thread, NULL);
     
     printf("[Sistema] Modulo Persistenza chiuso correttamente.\n");
 }
 
+/*
+ * Descrizione: Verifica se le credenziali fornite corrispondono a un
+ * record presente nella cache degli utenti.
+ *
+ * Parametri:
+ * username - Stringa contenente il nome utente.
+ * password - Stringa contenente la password.
+ *
+ * Ritorno:
+ * int - 1 se l'autenticazione ha successo, 0 in caso contrario.
+ */
 int authenticate_user(const char* username, const char* password) {
     int success = 0;
     
-    pthread_mutex_lock(&cache_mutex); // Blocca la lettura per evitare sovrapposizioni
+    pthread_mutex_lock(&cache_mutex); 
     for (int i = 0; i < user_count; i++) {
         if (strcmp(user_cache[i].username, username) == 0 && 
             strcmp(user_cache[i].password, password) == 0) {
             success = 1;
-            break; // Utente trovato
+            break; 
         }
     }
     pthread_mutex_unlock(&cache_mutex);
@@ -210,39 +251,46 @@ int authenticate_user(const char* username, const char* password) {
     return success;
 }
 
+/*
+ * Descrizione: Registra un nuovo utente nel sistema. Verifica l'assenza
+ * di duplicati, aggiorna la cache in RAM e inserisce il record nella coda
+ * di scrittura asincrona su file.
+ *
+ * Parametri:
+ * username - Stringa contenente il nome utente scelto.
+ * password - Stringa contenente la password associata.
+ *
+ * Ritorno:
+ * int - 1 se la registrazione ha successo, 0 se l'utente esiste già o la cache è piena.
+ */
 int register_user(const char* username, const char* password) {
     pthread_mutex_lock(&cache_mutex);
     
-    // Controllo 1: La cache è piena?
     if (user_count >= MAX_USERS) {
         pthread_mutex_unlock(&cache_mutex);
         return 0; 
     }
     
-    // Controllo 2: L'utente esiste già?
     for (int i = 0; i < user_count; i++) {
         if (strcmp(user_cache[i].username, username) == 0) {
             pthread_mutex_unlock(&cache_mutex);
-            return 0; // Nome utente non disponibile
+            return 0; 
         }
     }
     
-    // Inserimento nella Cache Veloce
     strncpy(user_cache[user_count].username, username, MAX_USERNAME);
     strncpy(user_cache[user_count].password, password, MAX_PASSWORD);
     user_count++;
     pthread_mutex_unlock(&cache_mutex);
     
-    // Sottomissione asincrona al Thread di I/O (Produttore)
     pthread_mutex_lock(&uq_mutex);
     if (uq_count < WRITE_QUEUE_SIZE) {
         strncpy(user_queue[uq_tail].username, username, MAX_USERNAME);
         strncpy(user_queue[uq_tail].password, password, MAX_PASSWORD);
         uq_tail = (uq_tail + 1) % WRITE_QUEUE_SIZE;
         uq_count++;
-        pthread_cond_signal(&uq_not_empty); // Sveglia il Persister!
+        pthread_cond_signal(&uq_not_empty); 
     } else {
-        // Gestione limite coda (per un progetto OS possiamo semplicemente scartare o bloccarci, qui scartiamo per non bloccare il server)
         printf("[Errore] Coda di scrittura disco piena! Salvataggio perso.\n");
     }
     pthread_mutex_unlock(&uq_mutex);
@@ -250,6 +298,18 @@ int register_user(const char* username, const char* password) {
     return 1;
 }
 
+/*
+ * Descrizione: Salva un nuovo messaggio in bacheca. Genera un ID univoco,
+ * aggiorna la cache e segnala al thread worker dei messaggi di eseguire un flush.
+ *
+ * Parametri:
+ * username - Nome utente dell'autore (derivato dalla sessione del socket).
+ * subject - Oggetto del messaggio.
+ * body - Corpo principale del messaggio.
+ *
+ * Ritorno:
+ * int - L'ID univoco generato per il messaggio in caso di successo, -1 in caso di errore (cache piena).
+ */
 int save_message(const char* username, const char* subject, const char* body) {
     uint32_t new_id = 0;
     pthread_mutex_lock(&msg_mutex);
@@ -264,21 +324,30 @@ int save_message(const char* username, const char* subject, const char* body) {
     pthread_mutex_unlock(&msg_mutex);
     
     if (new_id > 0) {
-        trigger_message_flush(); // Avvisa il thread I/O di riscrivere il file!
+        trigger_message_flush(); 
     }
     return new_id > 0 ? (int)new_id : -1;
 }
 
+/*
+ * Descrizione: Recupera i messaggi presenti in bacheca, copiandoli dalla cache
+ * a un buffer fornito dal chiamante, in modo thread-safe.
+ *
+ * Parametri:
+ * buffer - Puntatore all'array di MessageRecord pre-allocato dal chiamante.
+ * num - Capacità massima del buffer.
+ *
+ * Ritorno:
+ * int - Il numero effettivo di messaggi copiati nel buffer.
+ */
 int get_messages(MessageRecord* buffer, int num) {
     int count = 0;
     
     pthread_mutex_lock(&msg_mutex);
-    
-    // Copiamo fino a 'num' messaggi, ma non più di quanti ne abbiamo realmente
     count = (num < message_count) ? num : message_count;
     
     for (int i = 0; i < count; i++) {
-        buffer[i] = message_cache[i]; // In C, assegnare una struct copia tutti i suoi campi!
+        buffer[i] = message_cache[i]; 
     }
     
     pthread_mutex_unlock(&msg_mutex);
@@ -286,6 +355,18 @@ int get_messages(MessageRecord* buffer, int num) {
     return count;
 }
 
+/*
+ * Descrizione: Rimuove un messaggio dalla bacheca, traslando l'array in memoria.
+ * Verifica preventivamente l'autorizzazione confrontando il nome utente del chiamante
+ * con quello del mittente del messaggio. Attiva il flush su disco in caso di successo.
+ *
+ * Parametri:
+ * id - ID del messaggio da eliminare.
+ * username - Nome utente di chi ha richiesto l'eliminazione.
+ *
+ * Ritorno:
+ * int - 1 se il messaggio è stato eliminato, 0 se non è stato trovato o l'utente non è autorizzato.
+ */
 int delete_message(uint32_t id, const char* username) {
     int found = 0;
     pthread_mutex_lock(&msg_mutex);
@@ -302,7 +383,7 @@ int delete_message(uint32_t id, const char* username) {
     pthread_mutex_unlock(&msg_mutex);
     
     if (found) {
-        trigger_message_flush(); // Avvisa il thread I/O di riscrivere il file (ora senza il messaggio eliminato)
+        trigger_message_flush(); 
     }
     return found;
-}   
+}

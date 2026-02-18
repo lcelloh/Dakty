@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include "../include/client_controller.h"
 #include "../include/protocol.h"
 
@@ -8,17 +9,75 @@
 #define SERVER_IP "127.0.0.1"
 
 // ==========================================
+// GESTIONE SEGNALI
+// ==========================================
+
+/*
+ * Descrizione: Handler per l'interruzione manuale (SIGINT / Ctrl+C).
+ * Garantisce che il client termini restituendo un codice di successo,
+ * chiudendo implicitamente i descrittori di file aperti dal processo.
+ */
+void handle_sigint(int sig) {
+    printf("\n\n[*] Interruzione manuale (Ctrl+C). Uscita da Dakty. Arrivederci!\n");
+    exit(EXIT_SUCCESS); 
+}
+
+/*
+ * Descrizione: Handler per la rottura del socket (SIGPIPE).
+ * Viene innescato dal kernel se il client tenta di fare una send_all verso 
+ * un server che è stato spento o è irraggiungibile, evitando un crash silenzioso.
+ */
+void handle_sigpipe(int sig) {
+    printf("\n\n[!] ERRORE FATALE (Broken Pipe): La connessione con il server si è interrotta bruscamente.\n");
+    printf("[*] Chiusura del client in corso...\n");
+    exit(EXIT_FAILURE); 
+}
+
+/*
+ * Descrizione: Configura i gestori dei segnali tramite sigaction prima 
+ * dell'avvio del ciclo di vita del client.
+ */
+void setup_signals() {
+    struct sigaction sa_pipe, sa_int;
+
+    sa_pipe.sa_handler = handle_sigpipe;
+    sigemptyset(&sa_pipe.sa_mask);
+    sa_pipe.sa_flags = 0;
+    if (sigaction(SIGPIPE, &sa_pipe, NULL) == -1) {
+        perror("Errore configurazione SIGPIPE");
+        exit(EXIT_FAILURE);
+    }
+
+    sa_int.sa_handler = handle_sigint;
+    sigemptyset(&sa_int.sa_mask);
+    sa_int.sa_flags = 0;
+    if (sigaction(SIGINT, &sa_int, NULL) == -1) {
+        perror("Errore configurazione SIGINT");
+        exit(EXIT_FAILURE);
+    }
+}
+
+// ==========================================
 // FUNZIONI DI UTILITA' (UX / UI)
 // ==========================================
 
+/*
+ * Descrizione: Pulisce la schermata del terminale tramite codici di escape ANSI.
+ */
 void clear_screen() {
     printf("\033[2J\033[H");
 }
 
+/*
+ * Descrizione: Mette in pausa l'esecuzione in attesa che l'utente prema INVIO.
+ * Svuota in modo sicuro eventuali residui di caratteri nel buffer di input (stdin) 
+ * per evitare che inquinino le letture successive.
+ */
 void wait_for_enter() {
     char temp[10];
     printf("\n[Premi INVIO per continuare...]");
     if (fgets(temp, sizeof(temp), stdin) != NULL) {
+        /* Se non è presente il newline, il buffer contiene ancora dati: esegue il flush */
         if (strchr(temp, '\n') == NULL) {
             int c;
             while ((c = getchar()) != '\n' && c != EOF);
@@ -26,6 +85,14 @@ void wait_for_enter() {
     }
 }
 
+/*
+ * Descrizione: Legge una stringa da stdin in modo sicuro. Rimuove il carattere 
+ * di newline finale e gli eventuali spazi vuoti in coda.
+ *
+ * Parametri:
+ * buffer - Puntatore all'array di caratteri destinazione.
+ * len - Dimensione massima leggibile per prevenire buffer overflow.
+ */
 void safe_read(char* buffer, int len){
     if (fgets(buffer, len, stdin) != NULL) {
         buffer[strcspn(buffer, "\n")] = '\0'; 
@@ -37,15 +104,26 @@ void safe_read(char* buffer, int len){
 }   
 
 // ==========================================
-// FLUSSI DELL'APPLICAZIONE
+// FLUSSI DELL'APPLICAZIONE (MACCHINE A STATI)
 // ==========================================
 
+/*
+ * Descrizione: Gestisce lo stato di "Non Autenticato". Mostra il menu di accesso 
+ * e orchestra le chiamate al client_controller per il Login e la Registrazione.
+ *
+ * Parametri:
+ * sock - File descriptor del socket connesso al server.
+ * username - Buffer in cui salvare il nome utente in caso di successo.
+ *
+ * Ritorno:
+ * int - 1 se l'utente si autentica con successo, 0 se decide di uscire dall'app.
+ */
 int auth_client(int sock, char* username){
     char password[MAX_PASSWORD];
     char choice[10];
 
     while (1) {
-        clear_screen(); // Pulisce prima di mostrare il menu
+        clear_screen(); 
         printf("=====================================\n");
         printf("           AUTENTICAZIONE DAKTY      \n");
         printf("=====================================\n");
@@ -68,21 +146,23 @@ int auth_client(int sock, char* username){
             safe_read(password, MAX_PASSWORD);
 
             if (strcmp(choice, "1") == 0) {
+                /* Delega al controller la logica di rete per il Login */
                 if (dakty_login(sock, username, password)) {
                     printf("\n[+] Accesso consentito! Benvenuto, %s.\n", username);
-                    wait_for_enter(); // Pausa per far leggere il benvenuto
+                    wait_for_enter(); 
                     return 1;
                 } else {
-                    printf("\n[-] Login fallito. Credenziali errate o utente inesistente.\n");
-                    wait_for_enter(); // Pausa per far leggere l'errore prima di ripulire
+                    printf("\n[-] Login fallito o server non raggiungibile.\n");
+                    wait_for_enter(); 
                 }
             } else {
+                /* Delega al controller la logica di rete per la Registrazione */
                 if (dakty_register(sock, username, password)) {
                     printf("\n[+] Registrazione completata! Benvenuto, %s.\n", username);
                     wait_for_enter();
                     return 1; 
                 } else {
-                    printf("\n[-] Registrazione fallita. Nome utente forse già in uso.\n");
+                    printf("\n[-] Registrazione fallita o server non raggiungibile.\n");
                     wait_for_enter();
                 }
             }
@@ -94,11 +174,22 @@ int auth_client(int sock, char* username){
     return 0;
 }
 
+/*
+ * Descrizione: Gestisce lo stato "Autenticato". Raccoglie gli input utente
+ * e instrada le richieste ai metodi del client_controller per la manipolazione
+ * della bacheca o il logout.
+ *
+ * Parametri:
+ * sock - File descriptor del socket connesso.
+ *
+ * Ritorno:
+ * int - 1 per tornare al menu di autenticazione (Logout), 0 per chiudere il client.
+ */
 int user_loop(int sock) {
     char choice[10];
 
     while (1) {
-        clear_screen(); // Pulisce prima del menu principale
+        clear_screen(); 
         printf("=====================================\n");
         printf("         MENU PRINCIPALE DAKTY       \n");
         printf("=====================================\n");
@@ -112,12 +203,16 @@ int user_loop(int sock) {
         safe_read(choice, sizeof(choice));
 
         if (strcmp(choice, "1") == 0) {
-            clear_screen(); // Pulisce lo schermo prima di stampare l'intera bacheca
+            clear_screen(); 
             ResponsePayload* bacheca = NULL;
+            
+            /* Delega al controller la richiesta ed estrae il numero di messaggi */
             int count = dakty_read_messages(sock, &bacheca);
 
             if (count < 0) {
-                printf("[-] Errore di comunicazione con il server.\n");
+                printf("[-] Errore fatale di rete: il server si è disconnesso.\n");
+                wait_for_enter();
+                return 0; 
             } else if (count == 0) {
                 printf("======================================================\n");
                 printf("                  BACHECA DAKTY                       \n");
@@ -137,7 +232,7 @@ int user_loop(int sock) {
                 }
                 free(bacheca); 
             }
-            wait_for_enter(); // Lascia all'utente il tempo di leggere la bacheca!
+            wait_for_enter(); 
         } 
         else if (strcmp(choice, "2") == 0) {
             char subject[MAX_SUBJECT];
@@ -157,7 +252,7 @@ int user_loop(int sock) {
                 if (dakty_post_message(sock, subject, body)) {
                     printf("[+] Messaggio pubblicato con successo!\n");
                 } else {
-                    printf("[-] Errore durante la pubblicazione del messaggio.\n");
+                    printf("[-] Errore: pubblicazione fallita o server disconnesso.\n");
                 }
             }
             wait_for_enter();
@@ -177,7 +272,7 @@ int user_loop(int sock) {
                 if (dakty_delete_message(sock, target_id)) {
                     printf("[+] Messaggio #%d eliminato con successo!\n", target_id);
                 } else {
-                    printf("[-] Eliminazione negata. Sei sicuro di esserne l'autore?\n");
+                    printf("[-] Eliminazione negata o server irraggiungibile.\n");
                 }
             }
             wait_for_enter();
@@ -188,12 +283,13 @@ int user_loop(int sock) {
                 wait_for_enter();
                 return 1; 
             } else {
-                printf("\n[-] Errore di comunicazione durante il logout.\n");
+                printf("\n[-] Errore fatale: server disconnesso.\n");
                 wait_for_enter();
+                return 0; 
             }
         } 
         else if (strcmp(choice, "5") == 0) {
-            printf("\n[*] Uscita da Dakty BBS.\n");
+            printf("\n[*] Uscita da Dakty.\n");
             return 0; 
         } 
         else {
@@ -203,9 +299,21 @@ int user_loop(int sock) {
     }
 }
 
+// ==========================================
+// ENTRY-POINT (ORCHESTRAZIONE)
+// ==========================================
+
+/*
+ * Descrizione: Funzione principale del Client. Inizializza i segnali, tenta
+ * la connessione di rete e gestisce il ciclo di vita dell'applicazione alternando
+ * le viste (macchina a stati) in base ai risultati delle operazioni utente.
+ */
 int main() {
     int server_sock;
     char user[MAX_USERNAME]; 
+
+    /* 1. Setup per prevenire crash da SIGPIPE o SIGINT */
+    setup_signals(); 
 
     clear_screen(); 
     printf("=====================================\n");
@@ -213,26 +321,32 @@ int main() {
     printf("=====================================\n");
 
     printf("[*] Connessione al server in corso...\n");
+    
+    /* 2. Setup di Rete (Richiesta connessione TCP) */
     server_sock = dakty_connect(SERVER_IP, PORT);
     if (server_sock < 0) {
         printf("[-] Impossibile contattare il server Dakty. Esco.\n");
         exit(EXIT_FAILURE);
     }
     printf("[+] Connesso con successo!\n");
-    wait_for_enter(); // Lascia leggere che il server si è connesso
+    wait_for_enter(); 
 
+    /* 3. Avvio della Macchina a Stati (Loop dell'App) */
     int running = 1;
     while (running) {
+        /* auth_client passa il controllo a user_loop solo se l'autenticazione ha successo */
         if (auth_client(server_sock, user)) {
             running = user_loop(server_sock);   
         } else {
+            /* Se auth_client o user_loop restituiscono 0, l'utente vuole uscire */
             break; 
         }
     }
 
-    clear_screen(); // Pulizia finale prima di restituire il prompt
+    /* 4. Cleanup Finale */
+    clear_screen(); 
     printf("[*] Disconnessione dal server...\n");
     dakty_disconnect(server_sock);
-    printf("Grazie per aver usato Dakty BBS. Arrivederci!\n\n");
+    printf("Grazie per aver usato Dakty. Arrivederci!\n\n");
     return 0;
 }
