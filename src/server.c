@@ -30,7 +30,6 @@ pthread_mutex_t active_sockets_mutex = PTHREAD_MUTEX_INITIALIZER;
 void handle_signal(int sig) {
     if (sig == SIGINT || sig == SIGTERM) {
         keep_running = 0; 
-        close(server_fd);
     }
 }
 
@@ -79,7 +78,7 @@ int main() {
         active_sockets[i] = -1;
     }
 
-    /* 1. SETUP SEGNALI (sigaction garantisce la portabilità POSIX) */
+    /* SETUP SEGNALI ) */
     struct sigaction sa;
     sa.sa_handler = handle_signal;
     sigemptyset(&sa.sa_mask);
@@ -94,7 +93,15 @@ int main() {
         exit(EXIT_FAILURE);
     }
     
-    /* 2. INIZIALIZZAZIONE MODULI (Persistenza e Concorrenza) */
+    struct sigaction sa_pipe;
+    sa_pipe.sa_handler = SIG_IGN; 
+    sigemptyset(&sa_pipe.sa_mask);
+    sa_pipe.sa_flags = 0;
+    if (sigaction(SIGPIPE, &sa_pipe, NULL) == -1) {
+        perror("Errore: fallita l'impostazione di SIGPIPE");
+        exit(EXIT_FAILURE);
+    }   
+    /* INIZIALIZZAZIONE MODULI (Persistenza e Concorrenza) */
     printf("Init strutture necessarie.\n");
     persistence_init(); /* Carica file da disco e avvia i thread I/O */
     pool_init(&pool);   /* Inizializza mutex e condition variables per la coda */
@@ -107,7 +114,7 @@ int main() {
         pthread_create(&threads[i], NULL, worker_thread, id);
     }
 
-    /* 3. SETUP RETE (Socket, Bind, Listen) */
+    /*SETUP RETE (Socket, Bind, Listen) */
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         perror("Errore: fallita la creazione del socket");
         exit(EXIT_FAILURE);
@@ -135,7 +142,7 @@ int main() {
     printf("Server Dakty in ascolto sulla porta %d...\n", PORT);
     printf("Premi Ctrl+C per spegnere il server in modo pulito.\n");
 
-    /* 4. MAIN LOOP (Accettazione client e sottomissione al pool) */
+    /* MAIN LOOP (Accettazione client e sottomissione al pool) */
     while (keep_running) {
         client_sock = accept(server_fd, (struct sockaddr *)&client_addr, &addr_size);
         
@@ -153,7 +160,7 @@ int main() {
         pool_submit(&pool, client_sock);
     }
 
-    /* 5. GRACEFUL SHUTDOWN (Orchestrazione spegnimento moduli) */
+    /* 5. GRACEFUL SHUTDOWN*/
     printf("Avvio procedura di spegnimento di Dakty...\n");
     close(server_fd); 
     
@@ -166,13 +173,10 @@ int main() {
     }
     pthread_mutex_unlock(&active_sockets_mutex);
 
-    /* Invia il segnale di terminazione tramite condition variables a tutti i worker liberi */
     pool_shutdown(&pool); 
     
-    /* Arresta i thread di scrittura file (I/O asincrono) e chiude i descrittori file */
     persistence_shutdown();
 
-    /* Attendiamo la chiusura definitiva (return NULL) di tutti i Worker Thread */
     for (int i = 0; i < THREAD_POOL_SIZE; i++) {
         pthread_join(threads[i], NULL); 
     }

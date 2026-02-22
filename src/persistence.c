@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>   // Per la gestione di EINTR
 
 #define DB_USER_FILE "data/utenti.txt"
 #define DB_MSG_FILE "data/messaggi.txt"
@@ -38,13 +39,7 @@ static int persistence_running = 1;
 /*
  * Descrizione: Thread worker in background dedicato al salvataggio incrementale
  * degli utenti. Estrae i record dalla coda circolare e li appende al file su
- * disco.
- *
- * Parametri:
- * arg - Puntatore generico (non utilizzato, richiesto dalla firma di pthreads).
- *
- * Ritorno:
- * void* - Restituisce sempre NULL alla terminazione del thread.
+ * disco gestendo esplicitamente le interruzioni di sistema (EINTR).
  */
 static void *user_file_thr(void *arg) {
   while (1) {
@@ -63,10 +58,29 @@ static void *user_file_thr(void *arg) {
     uq_count--;
     pthread_mutex_unlock(&uq_mutex);
 
-    FILE *file = fopen(DB_USER_FILE, "a");
+    FILE *file;
+    while ((file = fopen(DB_USER_FILE, "a")) == NULL) {
+      if (errno == EINTR) continue;
+      break;
+    }
+
     if (file) {
-      fprintf(file, "%s %s\n", new_user.username, new_user.password);
-      fclose(file);
+      while (fprintf(file, "%s %s\n", new_user.username, new_user.password) < 0) {
+        if (errno == EINTR) {
+          clearerr(file); 
+          continue;
+        }
+        perror("[Errore] Scrittura su file utenti fallita");
+        break; 
+      }
+      
+      while (fclose(file) != 0) {
+        if (errno == EINTR) continue;
+        perror("[Errore] Chiusura file utenti fallita");
+        break;
+      }
+    } else {
+      perror("[Errore] Impossibile aprire il file utenti per l'append");
     }
   }
   return NULL;
@@ -74,15 +88,8 @@ static void *user_file_thr(void *arg) {
 
 /*
  * Descrizione: Thread worker in background per la persistenza dei messaggi.
- * Utilizza un approccio "Dump/Truncate": ad ogni segnalazione di modifica,
- * esegue una copia locale della cache e sovrascrive interamente il file su
- * disco per mantenere la sincronia in caso di eliminazioni.
- *
- * Parametri:
- * arg - Puntatore generico (non utilizzato).
- *
- * Ritorno:
- * void* - Restituisce sempre NULL alla terminazione del thread.
+ * Utilizza la tecnica del file temporaneo e del rename atomico per garantire
+ * l'integrità del database anche in caso di errori di scrittura.
  */
 static void *message_file_thr(void *arg) {
   while (1) {
@@ -99,7 +106,6 @@ static void *message_file_thr(void *arg) {
     msg_needs_flush = 0;
     pthread_mutex_unlock(&mq_mutex);
 
-    /* Copia della cache in un buffer locale per minimizzare il tempo di lock */
     pthread_mutex_lock(&msg_mutex);
     int local_count = message_count;
     MessageRecord *local_dump = malloc(local_count * sizeof(MessageRecord));
@@ -109,13 +115,45 @@ static void *message_file_thr(void *arg) {
     pthread_mutex_unlock(&msg_mutex);
 
     if (local_dump) {
-      FILE *file = fopen(DB_MSG_FILE, "w");
+      FILE *file;
+      while ((file = fopen(DB_MSG_FILE ".tmp", "w")) == NULL) {
+        if (errno == EINTR) continue;
+        break;
+      }
+
       if (file) {
+          // Se avviene errore fatale
+        int write_error = 0;
+        
         for (int i = 0; i < local_count; i++) {
-          fprintf(file, "%u|%s|%s|%s\n", local_dump[i].id, local_dump[i].sender,
-                  local_dump[i].subject, local_dump[i].body);
+          while (fprintf(file, "%u|%s|%s|%s\n", local_dump[i].id, local_dump[i].sender,
+                         local_dump[i].subject, local_dump[i].body) < 0) {
+            if (errno == EINTR) {
+              clearerr(file);
+              continue;
+            }
+            write_error = 1; 
+            break;
+          }
+          if (write_error) break; 
         }
-        fclose(file);
+
+        while (fclose(file) != 0) {
+          if (errno == EINTR) continue;
+          write_error = 1;
+          break;
+        }
+
+        if (!write_error) {
+          if (rename(DB_MSG_FILE ".tmp", DB_MSG_FILE) != 0) {
+            perror("[Errore] Sostituzione del file messaggi fallita");
+          }
+        } else {
+          perror("[Errore] Salvataggio fallito. Ripristino lo stato precedente.");
+          remove(DB_MSG_FILE ".tmp"); 
+        }
+      } else {
+        perror("[Errore] Impossibile creare il file temporaneo dei messaggi");
       }
       free(local_dump);
     }
@@ -123,14 +161,6 @@ static void *message_file_thr(void *arg) {
   return NULL;
 }
 
-/*
- * Descrizione: Funzione helper che segnala al thread di persistenza dei
- * messaggi la necessità di effettuare un nuovo dump su disco.
- *
- * Parametri: Nessuno.
- *
- * Ritorno: Nessuno.
- */
 static void trigger_message_flush() {
   pthread_mutex_lock(&mq_mutex);
   msg_needs_flush = 1;
@@ -142,54 +172,82 @@ static void trigger_message_flush() {
 // PERSISTENCE API (PUBBLICHE)
 // ==========================================
 
-/*
- * Descrizione: Inizializza il modulo di persistenza. Carica in RAM gli utenti
- * e i messaggi dai rispettivi file, allinea il contatore degli ID
- * autoincrementanti e avvia i thread worker asincroni per le operazioni di I/O.
- *
- * Parametri: Nessuno.
- *
- * Ritorno: Nessuno.
- */
 void persistence_init() {
-  FILE *f_users = fopen(DB_USER_FILE, "r");
+  FILE *f_users;
+  while ((f_users = fopen(DB_USER_FILE, "r")) == NULL) {
+    if (errno == EINTR) continue;
+    break;
+  }
+  
   if (f_users) {
     char u[MAX_USERNAME], p[MAX_PASSWORD];
-    while (fscanf(f_users, "%31s %31s", u, p) == 2 && user_count < MAX_USERS) {
-      strncpy(user_cache[user_count].username, u, MAX_USERNAME);
-      strncpy(user_cache[user_count].password, p, MAX_PASSWORD);
-      user_count++;
+    int ret;
+    while (user_count < MAX_USERS) {
+      /* Lettura utenti protetta da EINTR */
+      ret = fscanf(f_users, "%31s %31s", u, p);
+      if (ret == 2) {
+        strncpy(user_cache[user_count].username, u, MAX_USERNAME);
+        strncpy(user_cache[user_count].password, p, MAX_PASSWORD);
+        user_count++;
+      } else if (ret == EOF) {
+        if (ferror(f_users) && errno == EINTR) {
+          clearerr(f_users);
+          continue; 
+        }
+        break;
+      } else {
+        break; 
+      }
     }
-    fclose(f_users);
+    
+    while (fclose(f_users) != 0) {
+        if (errno == EINTR) continue;
+        break;
+    }
   }
 
-  FILE *f_msgs = fopen(DB_MSG_FILE, "r");
+  FILE *f_msgs;
+  while ((f_msgs = fopen(DB_MSG_FILE, "r")) == NULL) {
+    if (errno == EINTR) continue;
+    break;
+  }
+
   uint32_t max_id = 0;
   if (f_msgs) {
     char line[1024];
-    while (fgets(line, sizeof(line), f_msgs) != NULL &&
-           message_count < MAX_MESSAGGES) {
-      line[strcspn(line, "\n")] = '\0';
+    while (message_count < MAX_MESSAGGES) {
+      if (fgets(line, sizeof(line), f_msgs) != NULL) {
+        line[strcspn(line, "\n")] = '\0';
 
-      char *id_str = strtok(line, "|");
-      char *sender = strtok(NULL, "|");
-      char *subject = strtok(NULL, "|");
-      char *body = strtok(NULL, "|");
+        char *id_str = strtok(line, "|");
+        char *sender = strtok(NULL, "|");
+        char *subject = strtok(NULL, "|");
+        char *body = strtok(NULL, "|");
 
-      if (id_str && sender && subject && body) {
-        uint32_t id = (uint32_t)atoi(id_str);
+        if (id_str && sender && subject && body) {
+          uint32_t id = (uint32_t)atoi(id_str);
 
-        message_cache[message_count].id = id;
-        strncpy(message_cache[message_count].sender, sender, MAX_USERNAME - 1);
-        strncpy(message_cache[message_count].subject, subject, MAX_SUBJECT - 1);
-        strncpy(message_cache[message_count].body, body, MAX_BODY - 1);
-        message_count++;
+          message_cache[message_count].id = id;
+          strncpy(message_cache[message_count].sender, sender, MAX_USERNAME - 1);
+          strncpy(message_cache[message_count].subject, subject, MAX_SUBJECT - 1);
+          strncpy(message_cache[message_count].body, body, MAX_BODY - 1);
+          message_count++;
 
-        if (id > max_id)
-          max_id = id;
+          if (id > max_id) max_id = id;
+        }
+      } else {
+        if (ferror(f_msgs) && errno == EINTR) {
+          clearerr(f_msgs);
+          continue;
+        }
+        break; 
       }
     }
-    fclose(f_msgs);
+    
+    while (fclose(f_msgs) != 0) {
+        if (errno == EINTR) continue;
+        break;
+    }
   }
 
   next_message_id = max_id + 1;
@@ -201,15 +259,6 @@ void persistence_init() {
   pthread_create(&msg_io_thread, NULL, message_file_thr, NULL);
 }
 
-/*
- * Descrizione: Segnala ai thread worker di I/O l'avvio della procedura di
- * spegnimento del server e attende in modo bloccante la loro terminazione
- * tramite pthread_join per garantire il salvataggio dei dati pendenti.
- *
- * Parametri: Nessuno.
- *
- * Ritorno: Nessuno.
- */
 void persistence_shutdown() {
   pthread_mutex_lock(&uq_mutex);
   pthread_mutex_lock(&mq_mutex);
@@ -225,17 +274,6 @@ void persistence_shutdown() {
   printf("[Sistema] Modulo Persistenza chiuso correttamente.\n");
 }
 
-/*
- * Descrizione: Verifica se le credenziali fornite corrispondono a un
- * record presente nella cache degli utenti.
- *
- * Parametri:
- * username - Stringa contenente il nome utente.
- * password - Stringa contenente la password.
- *
- * Ritorno:
- * int - 1 se l'autenticazione ha successo, 0 in caso contrario.
- */
 int authenticate_user(const char *username, const char *password) {
   int success = 0;
 
@@ -252,19 +290,6 @@ int authenticate_user(const char *username, const char *password) {
   return success;
 }
 
-/*
- * Descrizione: Registra un nuovo utente nel sistema. Verifica l'assenza
- * di duplicati, aggiorna la cache in RAM e inserisce il record nella coda
- * di scrittura asincrona su file.
- *
- * Parametri:
- * username - Stringa contenente il nome utente scelto.
- * password - Stringa contenente la password associata.
- *
- * Ritorno:
- * int - 1 se la registrazione ha successo, 0 se l'utente esiste già o la cache
- * è piena.
- */
 int register_user(const char *username, const char *password) {
   pthread_mutex_lock(&cache_mutex);
 
@@ -300,20 +325,6 @@ int register_user(const char *username, const char *password) {
   return 1;
 }
 
-/*
- * Descrizione: Salva un nuovo messaggio in bacheca. Genera un ID univoco,
- * aggiorna la cache e segnala al thread worker dei messaggi di eseguire un
- * flush.
- *
- * Parametri:
- * username - Nome utente dell'autore (derivato dalla sessione del socket).
- * subject - Oggetto del messaggio.
- * body - Corpo principale del messaggio.
- *
- * Ritorno:
- * int - L'ID univoco generato per il messaggio in caso di successo, -1 in caso
- * di errore (cache piena).
- */
 int save_message(const char *username, const char *subject, const char *body) {
   uint32_t new_id = 0;
   pthread_mutex_lock(&msg_mutex);
@@ -333,17 +344,6 @@ int save_message(const char *username, const char *subject, const char *body) {
   return new_id > 0 ? (int)new_id : -1;
 }
 
-/*
- * Descrizione: Recupera i messaggi presenti in bacheca, copiandoli dalla cache
- * a un buffer fornito dal chiamante, in modo thread-safe.
- *
- * Parametri:
- * buffer - Puntatore all'array di MessageRecord pre-allocato dal chiamante.
- * num - Capacità massima del buffer.
- *
- * Ritorno:
- * int - Il numero effettivo di messaggi copiati nel buffer.
- */
 int get_messages(MessageRecord *buffer, int num) {
   int count = 0;
 
@@ -359,20 +359,6 @@ int get_messages(MessageRecord *buffer, int num) {
   return count;
 }
 
-/*
- * Descrizione: Rimuove un messaggio dalla bacheca, traslando l'array in
- * memoria. Verifica preventivamente l'autorizzazione confrontando il nome
- * utente del chiamante con quello del mittente del messaggio. Attiva il flush
- * su disco in caso di successo.
- *
- * Parametri:
- * id - ID del messaggio da eliminare.
- * username - Nome utente di chi ha richiesto l'eliminazione.
- *
- * Ritorno:
- * int - 1 se il messaggio è stato eliminato, 0 se non è stato trovato o
- * l'utente non è autorizzato.
- */
 int delete_message(uint32_t id, const char *username) {
   int found = 0;
   pthread_mutex_lock(&msg_mutex);

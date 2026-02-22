@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <errno.h>
 #include "../include/client_controller.h"
 #include "../include/protocol.h"
 
@@ -71,33 +72,52 @@ void clear_screen() {
 void wait_for_enter() {
     char temp[10];
     printf("\n[Premi INVIO per continuare...]");
-    if (fgets(temp, sizeof(temp), stdin) != NULL) {
-        /* Se non è presente il newline, il buffer contiene ancora dati: esegue il flush */
-        if (strchr(temp, '\n') == NULL) {
-            int c;
-            while ((c = getchar()) != '\n' && c != EOF);
+    
+    while (1) {
+        if (fgets(temp, sizeof(temp), stdin) != NULL) {
+            if (strchr(temp, '\n') == NULL) {
+                int c;
+                while ((c = getchar()) != '\n' && c != EOF);
+            }
+            break; // Lettura andata a buon fine, esci dal ciclo
+        } else {
+            // Se fgets fallisce
+            if (errno == EINTR) {
+                clearerr(stdin); 
+                continue;
+            }
+            printf("\n\n[*] Chiusura forzata dell'input. Arrivederci!\n");
+            exit(EXIT_SUCCESS);
         }
     }
 }
 
-/*
+ /*
  * Descrizione: Legge una stringa da stdin in modo sicuro. Rimuove il carattere 
  * di newline finale e gli eventuali spazi vuoti in coda.
- *
  * Parametri:
  * buffer - Puntatore all'array di caratteri destinazione.
  * len - Dimensione massima leggibile per prevenire buffer overflow.
- */
+ */ 
 void safe_read(char* buffer, int len){
-    if (fgets(buffer, len, stdin) != NULL) {
-        buffer[strcspn(buffer, "\n")] = '\0'; 
+    while (1) {
+        if (fgets(buffer, len, stdin) != NULL) {
+            buffer[strcspn(buffer, "\n")] = '\0'; 
 
-        for(int i = strlen(buffer) - 1; i >= 0 && buffer[i] == ' '; i--){
-            buffer[i] = '\0';
+            for(int i = strlen(buffer) - 1; i >= 0 && buffer[i] == ' '; i--){
+                buffer[i] = '\0';
+            }
+            break; 
+        } else {
+            if (errno == EINTR) {
+                clearerr(stdin); 
+                continue;
+            }
+            printf("\n\n[*] Standard Input chiuso. Terminazione client.\n");
+            exit(EXIT_SUCCESS);
         }
     }
-}   
-
+}
 
 /*
  * Descrizione: Gestisce lo stato di "Non Autenticato". Mostra il menu di accesso 
