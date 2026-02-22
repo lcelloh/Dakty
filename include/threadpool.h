@@ -14,8 +14,8 @@
  *
  * Campi:
  * client_sockets - Array di interi utilizzato come coda circolare per i socket.
- * head - Indice di lettura per i consumatori (worker thread).
- * tail - Indice di scrittura per il produttore (thread principale).
+ * head - Indice di lettura per i worker thread per indicare qual è il prossimo client socket da servire.
+ * tail - Indice di scrittura per il thread principale per indicare dove inserire prossimo socket.
  * count - Numero attuale di descrittori di socket presenti in coda.
  * lock - Mutex per garantire l'accesso esclusivo alla struttura.
  * not_empty - Variabile di condizione per bloccare i worker se la coda è vuota.

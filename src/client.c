@@ -8,9 +8,7 @@
 #define PORT 8080
 #define SERVER_IP "127.0.0.1"
 
-// ==========================================
 // GESTIONE SEGNALI
-// ==========================================
 
 /*
  * Descrizione: Handler per l'interruzione manuale (SIGINT / Ctrl+C).
@@ -57,9 +55,6 @@ void setup_signals() {
     }
 }
 
-// ==========================================
-// FUNZIONI DI UTILITA' (UX / UI)
-// ==========================================
 
 /*
  * Descrizione: Pulisce la schermata del terminale tramite codici di escape ANSI.
@@ -103,9 +98,6 @@ void safe_read(char* buffer, int len){
     }
 }   
 
-// ==========================================
-// FLUSSI DELL'APPLICAZIONE (MACCHINE A STATI)
-// ==========================================
 
 /*
  * Descrizione: Gestisce lo stato di "Non Autenticato". Mostra il menu di accesso 
@@ -299,9 +291,7 @@ int user_loop(int sock) {
     }
 }
 
-// ==========================================
-// ENTRY-POINT (ORCHESTRAZIONE)
-// ==========================================
+// ENTRY-POINT 
 
 /*
  * Descrizione: Funzione principale del Client. Inizializza i segnali, tenta

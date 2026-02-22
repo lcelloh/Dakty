@@ -36,8 +36,8 @@ void pool_init(ThreadPool *pool) {
 }
 
 /*
- * Descrizione: Sottomette un nuovo descrittore di socket alla coda dei task
- * (ruolo Produttore). Gestisce l'attesa se la coda ha raggiunto la sua capacità massima.
+ * Descrizione: Sottomette un nuovo descrittore di socket alla coda dei task.
+ * Gestisce l'attesa se la coda ha raggiunto la sua capacità massima.
  *
  * Parametri:
  * pool - Puntatore alla struttura ThreadPool condivisa.
@@ -49,7 +49,6 @@ void pool_init(ThreadPool *pool) {
 void pool_submit(ThreadPool *pool, int client_socket) {
     pthread_mutex_lock(&pool->lock);
 
-    /* Ciclo while per difendersi dalla vulnerabilità dei risvegli spuri (spurious wakeups) */
     while (pool->count == QUEUE_SIZE) {
         pthread_cond_wait(&pool->not_full, &pool->lock);
     }
@@ -65,7 +64,7 @@ void pool_submit(ThreadPool *pool, int client_socket) {
 }
 
 /*
- * Descrizione: Preleva un socket in attesa dalla coda dei task (ruolo Consumatore).
+ * Descrizione: Preleva un socket in attesa dalla coda dei task .
  * I worker thread utilizzano questa funzione bloccante per ottenere il prossimo client.
  *
  * Parametri:
